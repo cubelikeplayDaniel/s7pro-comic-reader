@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+
+# QuickJS Bytecode & Compilation Artifacts
+*.bin
+*.amr
+out.c
+*.tmp.c
+dist/
+tools/qjsc
+
+# Test Outputs & Dumps
+test_output/
+*.log
+screen_*.png
+screenshot_*.png
+tools/__pycache__/

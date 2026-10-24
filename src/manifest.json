@@ -1,0 +1,26 @@
+{
+  "appName": "漫画阅读器",
+  "version": "1.1.7",
+  "appid": "8001888800000001",
+  "icon": "app_icon.png",
+  "quickjs": {
+    "version": "20200705",
+    "bigNum": false
+  },
+  "meta": {
+    "otaVersion": "4.22.0"
+  },
+  "props": {
+    "supportUnInstall": true,
+    "addDesktop": {
+      "apollo_platform": true,
+      "y08_platform": true,
+      "hermes_platform": true
+    },
+    "Icons": {
+      "theme-y08": "app_icon.png",
+      "theme-apollo": "app_icon.png"
+    }
+  },
+  "cert": {}
+}
