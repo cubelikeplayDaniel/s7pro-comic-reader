@@ -39,7 +39,8 @@ function getStorageModule() {
 const STAGE_WIDTH = 972;
 const STAGE_HEIGHT = 240;
 const SIDEBAR_WIDTH = 48;
-const WATERFALL_CONTENT_WIDTH = 948;
+const BOOKSHELF_CONTENT_WIDTH = 948;
+const WATERFALL_CONTENT_WIDTH = 950;
 const DUAL_COLUMN_WIDTH = 474;
 const ROW_GAP = 10;
 const VIRTUAL_BUFFER_ROWS = 4;
@@ -85,8 +86,8 @@ function naturalPageComparator(a, b) {
  * 核心画幅几何与横竖判定算法
  */
 function classifyPageGeometry(imgW, imgH) {
-  const validW = (typeof imgW === 'number' && imgW > 0) ? imgW : 600;
-  const validH = (typeof imgH === 'number' && imgH > 0) ? imgH : 848;
+  const validW = (typeof imgW === 'number' && imgW > 0) ? imgW : 474;
+  const validH = (typeof imgH === 'number' && imgH > 0) ? imgH : 632;
   const ratio = validW / validH;
 
   // 严格数学判定: 宽大于高的 1.05 倍判定为横向漫画，涵盖 4:3, 16:9, 21:9 等所有跨页宽图
@@ -109,8 +110,8 @@ function classifyPageGeometry(imgW, imgH) {
   const wfWidth = isWide ? WATERFALL_CONTENT_WIDTH : DUAL_COLUMN_WIDTH;
   const cardHeight = Math.max(80, Math.round(wfWidth * (validH / validW)));
 
-  // 单页模式基准宽度: 横向宽漫占 1/1 全宽 (972px)，竖向漫画占 3/4 屏宽 (严格 729px)
-  const singleBaseW = isWide ? STAGE_WIDTH : Math.round(STAGE_WIDTH * 0.75);
+  // 单页模式基准宽度: 严格 1/1 全屏宽 (972px)，直通全分辨率高清原始图像
+  const singleBaseW = STAGE_WIDTH;
   const singleBaseH = Math.max(80, Math.round(singleBaseW * (validH / validW)));
 
   return {
@@ -146,15 +147,15 @@ function applyPageGeometry(pageObj, rawW, rawH, markVerified) {
 /**
  * 解析漫画文件夹图片清单
  */
-function parseComicFolder(bookTitle, subtitle, rawItems, pathPrefix, existingFileSet, rawWebpItems = []) {
+function parseComicFolder(bookTitle, subtitle, rawItems, pathPrefix, existingFileSet, rawWebpItems = [], sizeMap = null) {
   const sortedItems = (rawItems || []).slice().sort(naturalPageComparator);
   const baseDir = pathPrefix ? (pathPrefix.endsWith('/') ? pathPrefix : pathPrefix + '/') : '';
 
   const pages = sortedItems.map((item, idx) => {
     const pageId = idx + 1;
     let fileName = '';
-    let initialW = 600;
-    let initialH = 848;
+    let initialW = 474;
+    let initialH = 632;
     let verified = false;
 
     if (typeof item === 'string') {
@@ -166,8 +167,18 @@ function parseComicFolder(bookTitle, subtitle, rawItems, pathPrefix, existingFil
         initialH = item.imgH;
         verified = true;
       } else if (item.isWide) {
-        initialW = 960;
+        initialW = 950;
         initialH = 540;
+        verified = true;
+      }
+    }
+
+    if (!verified && sizeMap && sizeMap[fileName]) {
+      const dims = sizeMap[fileName];
+      if (Array.isArray(dims) && dims.length >= 2 && dims[0] > 0 && dims[1] > 0) {
+        initialW = dims[0];
+        initialH = dims[1];
+        verified = true;
       }
     }
 
@@ -185,9 +196,8 @@ function parseComicFolder(bookTitle, subtitle, rawItems, pathPrefix, existingFil
 
     // 核心安全与高清画质双轨优化:
     // 1. 双列瀑布流匹配 _thumb (474px点对点直通)，极速滑动、瞬现预加载、永不爆显存
-    // 2. 单页阅读与放大匹配 _high (850px, 1.7MB)，文字清晰锐利，双击放大细节完整且不超4MB红线
+    // 2. 单页阅读直通原始全分辨率图像 srcPath，保持原汁原味原始清晰度
     let hasThumb = false;
-    let hasHigh = false;
     let thumbSrc = srcPath;
     let highSrc = srcPath;
     const dotIdx = fileName.lastIndexOf('.');
@@ -210,9 +220,8 @@ function parseComicFolder(bookTitle, subtitle, rawItems, pathPrefix, existingFil
       if (existingFileSet && existingFileSet.has(highName)) {
         const fullHigh = baseDir + highName;
         highSrc = fullHigh.startsWith('/') ? ('file://' + fullHigh) : fullHigh;
-        hasHigh = true;
       } else {
-        highSrc = thumbSrc;
+        highSrc = srcPath; // 确保单页视图直通原始完整全分辨率图片，严禁回退至缩略图
       }
     }
 
@@ -224,7 +233,7 @@ function parseComicFolder(bookTitle, subtitle, rawItems, pathPrefix, existingFil
       thumbName: thumbName,
       highName: highName,
       hasThumb: hasThumb,
-      hasHigh: hasHigh,
+      hasHigh: (highSrc !== srcPath),
       src: srcPath,
       thumbSrc: thumbSrc,
       highSrc: highSrc,
@@ -352,7 +361,13 @@ const RootComponent = {
 
       // 目录指纹与增量解析缓存
       _lastScanSignature: '',
-      _cachedBooks: null
+      _cachedBooks: null,
+
+      // 书架水平滚动位置记忆
+      bookshelfScrollX: 0,
+      _rawBookshelfScrollX: 0,
+      _savedBookshelfScrollX: 0,
+      _isRestoringBookshelfScroll: false
     };
   },
   computed: {
@@ -467,20 +482,16 @@ const RootComponent = {
       const pageById = this.bookLayout.pageById;
       return pageById[this.currentPageId] || (this.currentBook.pages && this.currentBook.pages[0]) || {};
     },
-    // 单页模式基准宽度: 横向宽漫占 1/1 全宽 (972px)，竖向漫画占 3/4 屏宽 (约 729px) 并施加抗摩尔纹微偏置
+    // 单页模式基准宽度: 占 1/1 全宽 (972px)，直通全分辨率高清原图检视
     singleBaseWidth() {
-      const p = this.currentPage;
-      if (p && p.isWide) {
-        return STAGE_WIDTH;
-      }
-      return Math.round(STAGE_WIDTH * 0.75);
+      return STAGE_WIDTH;
     },
     singleBaseHeight() {
       const p = this.currentPage;
       if (!p || !p.imgW || !p.imgH) {
-        return Math.round(this.singleBaseWidth * 1.413);
+        return Math.round(STAGE_WIDTH * 1.413);
       }
-      return Math.round(this.singleBaseWidth * (p.imgH / p.imgW));
+      return Math.round(STAGE_WIDTH * (p.imgH / p.imgW));
     }
   },
   created() {
@@ -629,6 +640,13 @@ const RootComponent = {
               // 排除 /userdisk 根目录直接放杂图，但允许 Favorite, Music, Comics 直接放图片
               if (baseName !== 'userdisk' && !addedTitles.has(baseName)) {
                 const prefix = rootPath.endsWith('/') ? rootPath : (rootPath + '/');
+                let sizeMap = null;
+                if (rootFileSet.has('.sizes.json')) {
+                  try {
+                    const rawJson = await fs.readFile(prefix + '.sizes.json');
+                    if (rawJson) sizeMap = JSON.parse(rawJson);
+                  } catch (e) {}
+                }
                 const totalPagesCount = directImages.length + directWebp.length;
                 const directBook = parseComicFolder(
                   baseName,
@@ -636,7 +654,8 @@ const RootComponent = {
                   directImages,
                   prefix,
                   rootFileSet,
-                  directWebp
+                  directWebp,
+                  sizeMap
                 );
                 addedTitles.add(baseName);
                 scannedBooks.push(directBook);
@@ -660,6 +679,13 @@ const RootComponent = {
                 const webpFiles = subFiles.filter(isWebp);
                 if (imgFiles.length > 0 || webpFiles.length > 0) {
                   const prefix = subDirPath + '/';
+                  let sizeMap = null;
+                  if (subFileSet.has('.sizes.json')) {
+                    try {
+                      const rawJson = await fs.readFile(prefix + '.sizes.json');
+                      if (rawJson) sizeMap = JSON.parse(rawJson);
+                    } catch (e) {}
+                  }
                   const totalPagesCount = imgFiles.length + webpFiles.length;
                   const newBook = parseComicFolder(
                     dirName,
@@ -667,7 +693,8 @@ const RootComponent = {
                     imgFiles,
                     prefix,
                     subFileSet,
-                    webpFiles
+                    webpFiles,
+                    sizeMap
                   );
                   addedTitles.add(dirName);
                   scannedBooks.push(newBook);
@@ -882,10 +909,22 @@ const RootComponent = {
           const nw = e.size.naturalWidth;
           const nh = e.size.naturalHeight;
           const prevIsWide = pageObj.isWide;
-          const prevCardH = pageObj.cardHeight;
 
           applyPageGeometry(pageObj, nw, nh, true);
-          if (prevIsWide !== pageObj.isWide || Math.abs(prevCardH - pageObj.cardHeight) > 10) {
+
+          // 关键平抑: 同卷漫画比例通常高度统一。若此前整书未预置几何，将该比例同步给同卷未验证页面，避免每页异步加载时轮流突变
+          const book = this.currentBook;
+          if (book && Array.isArray(book.pages)) {
+            for (let i = 0; i < book.pages.length; i++) {
+              const p = book.pages[i];
+              if (p && !p.geometryVerified && !p.isWide) {
+                applyPageGeometry(p, nw, nh, false);
+              }
+            }
+          }
+
+          // 仅在横竖画幅形态发生反转 (宽漫 vs 竖漫) 时触发重排，轻微高度变化绝对不触发 layoutVersion++，彻底根除大小抖动
+          if (prevIsWide !== pageObj.isWide) {
             this.layoutVersion++;
           }
         }
@@ -950,25 +989,21 @@ const RootComponent = {
         try {
           const scroller = this.$refs.waterfallScroller;
           if (!scroller) return;
-          if (pageChanged) {
-            if (typeof scroller.scrollTo === 'function') {
-              scroller.scrollTo(0, targetY + 1, false);
-              scroller.scrollTo(0, targetY, false);
-            }
-            this.waterfallScrollY = targetY;
-            this._rawScrollY = targetY;
-          } else if (typeof scroller.scrollTo === 'function' && targetY > 0) {
-            scroller.scrollTo(0, targetY, false);
+          if (typeof scroller.scrollTop === 'function') {
+            scroller.scrollTop(targetY, false);
+            scroller.scrollTop(targetY);
           }
+          this.waterfallScrollY = targetY;
+          this._rawScrollY = targetY;
         } catch (err) {}
       }, 20);
     },
     scrollToWaterfallTop() {
       try {
         const scroller = this.$refs.waterfallScroller;
-        if (scroller && typeof scroller.scrollTo === 'function') {
-          scroller.scrollTo(0, 1, false);
-          scroller.scrollTo(0, 0, false);
+        if (scroller && typeof scroller.scrollTop === 'function') {
+          scroller.scrollTop(0, false);
+          scroller.scrollTop(0);
           this.waterfallScrollY = 0;
           this._rawScrollY = 0;
           this.currentPageId = 1;
@@ -1021,6 +1056,12 @@ const RootComponent = {
       }
       this.clearSingleTapTimer();
       this.currentBookIndex = Math.max(0, Math.min(bookIdx, this.bookshelf.length - 1));
+      // 记录进入漫画前的书架水平滚动位置 (单卡片 274px + 间距 18px = 292px)
+      const scrollX = (typeof this._rawBookshelfScrollX === 'number' && this._rawBookshelfScrollX > 0)
+        ? this._rawBookshelfScrollX
+        : Math.max(0, this.currentBookIndex * 292);
+      this._savedBookshelfScrollX = scrollX;
+      this.bookshelfScrollX = scrollX;
       this.currentPageId = 1;
       this.lastAnchorPageId = 1;
       this.enteredSinglePageId = 1;
@@ -1035,9 +1076,9 @@ const RootComponent = {
       const refreshTop = (delayMs) => {
         setTimeout(() => {
           try {
-            if (this.viewMode === 'waterfall' && this.$refs.waterfallScroller && typeof this.$refs.waterfallScroller.scrollTo === 'function') {
-              this.$refs.waterfallScroller.scrollTo(0, 1, false);
-              this.$refs.waterfallScroller.scrollTo(0, 0, false);
+            if (this.viewMode === 'waterfall' && this.$refs.waterfallScroller && typeof this.$refs.waterfallScroller.scrollTop === 'function') {
+              this.$refs.waterfallScroller.scrollTop(0, false);
+              this.$refs.waterfallScroller.scrollTop(0);
             }
           } catch (e) {}
         }, delayMs);
@@ -1045,14 +1086,64 @@ const RootComponent = {
       refreshTop(40);
       refreshTop(180);
     },
+    handleBookshelfScroll(e) {
+      if (this.viewMode !== 'bookshelf' || this._isRestoringBookshelfScroll) return;
+      try {
+        let x = 0;
+        if (e && e.contentOffset && typeof e.contentOffset.x === 'number') {
+          x = Math.abs(e.contentOffset.x);
+        } else if (e && typeof e.contentXOffset === 'number') {
+          x = Math.abs(e.contentXOffset);
+        }
+        if (x > 0) {
+          this._rawBookshelfScrollX = x;
+          this._savedBookshelfScrollX = x;
+          this.bookshelfScrollX = x;
+        }
+      } catch (err) {}
+    },
+    restoreBookshelfScrollPosition() {
+      const targetX = (typeof this._savedBookshelfScrollX === 'number' && this._savedBookshelfScrollX > 0)
+        ? this._savedBookshelfScrollX
+        : (this.currentBookIndex > 0 ? (this.currentBookIndex * 292) : 0);
+      this._isRestoringBookshelfScroll = true;
+      const restore = (delay) => {
+        setTimeout(() => {
+          try {
+            const scroller = this.$refs.bookshelfScroller;
+            if (scroller && typeof scroller.scrollLeft === 'function') {
+              scroller.scrollLeft(targetX, false);
+              scroller.scrollLeft(targetX);
+            }
+          } catch (e) {}
+          try {
+            const cardRef = this.$refs['bookshelfCard_' + this.currentBookIndex];
+            const domNode = Array.isArray(cardRef) ? cardRef[0] : cardRef;
+            if (domNode && this.$page && this.$page.$dom && typeof this.$page.$dom.scrollToElement === 'function') {
+              this.$page.$dom.scrollToElement(domNode, { offset: 0, animated: false });
+            }
+          } catch (e) {}
+          if (delay >= 500) {
+            setTimeout(() => {
+              this._isRestoringBookshelfScroll = false;
+            }, 200);
+          }
+        }, delay);
+      };
+      restore(30);
+      restore(100);
+      restore(250);
+      restore(500);
+    },
     goToBookshelf() {
       if (!this.canNavigateNow()) return;
       this.clearSingleTapTimer();
       this.resetPanAndZoom();
       this.viewMode = 'bookshelf';
       this.syncLeftSwipeBackState();
-      this.scanFilesystemComics();
+      // 保持当前已有书架列表引用，杜绝 DOM 重建造成滚动偏移量归零
       this.scheduleForceRepaint();
+      this.restoreBookshelfScrollPosition();
     },
     backToBookshelf() {
       this.goToBookshelf();
@@ -1431,76 +1522,62 @@ const RootComponent = {
     };
 
     // ==============================================================
-    // 视图 1: 书架模式 (Bookshelf View)
+    // 视图 1: 书架组件 (Bookshelf Scroller 常驻保活架构)
     // ==============================================================
-    if (this.viewMode === 'bookshelf') {
-      return h('div', {
-        style: {
-          width: '1020px',
-          height: '240px',
-          backgroundColor: '#0D0F15',
-          flexDirection: 'row'
-        },
-        on: {
-          touchstart: (e) => this.handleGlobalTouchStart(e),
-          touchmove: (e) => this.handleGlobalTouchMove(e),
-          touchend: (e) => this.handleGlobalTouchEnd(e)
-        }
-      }, [
-        renderLeftSidebar('bookshelf'),
-        h('div', {
-          style: {
-            width: STAGE_WIDTH + 'px',
-            height: '240px',
-            flexDirection: 'column',
-            paddingLeft: '12px',
-            paddingRight: '12px',
-            paddingTop: '14px',
-            paddingBottom: '14px',
-            justifyContent: 'center'
-          }
-        }, [
-          this.bookshelf.length === 0
-            ? h('div', {
-                style: {
-                  width: WATERFALL_CONTENT_WIDTH + 'px',
-                  height: '212px',
-                  backgroundColor: '#12151E',
-                  borderRadius: '14px',
-                  borderWidth: '1px',
-                  borderColor: '#1E2536',
-                  justifyContent: 'center',
-                  alignItems: 'center',
-                  flexDirection: 'column'
-                }
-              }, [
-                h('text', {
-                  style: { color: '#F8FAFC', fontSize: '18px', fontWeight: 'bold' }
-                }, '书架暂无漫画'),
-                h('text', {
-                  style: { color: '#94A3B8', fontSize: '14px', marginTop: '12px' }
-                }, '请通过电脑连接 USB (MTP)，将漫画文件夹放入 Favorite 目录中'),
-                h('text', {
-                  style: { color: '#64748B', fontSize: '12px', marginTop: '6px' }
-                }, '支持格式: png, jpg, jpeg, webp · 支持1~1000+自然编号 · 首张为封面')
-              ])
-            : h('scroller', {
-                key: 'bookshelf-main-scroller',
-                attrs: {
-                  'scroll-direction': 'horizontal',
-                  scrollDirection: 'horizontal',
-                  'show-scrollbar': false,
-                  scrollable: true
-                },
-                style: {
-                  width: WATERFALL_CONTENT_WIDTH + 'px',
-                  height: '212px',
-                  flexDirection: 'row'
-                }
-              }, [
-                h('div', {
-                  key: 'bookshelf-card-row',
+    const bookshelfScrollerVNode = h('scroller', {
+      key: 'bookshelf-main-scroller',
+      ref: 'bookshelfScroller',
+      attrs: {
+        'scroll-direction': 'horizontal',
+        scrollDirection: 'horizontal',
+        'show-scrollbar': false,
+        scrollable: this.viewMode === 'bookshelf',
+        'scroll-event-interval': 100,
+        'offset-accuracy': 10
+      },
+      style: {
+        position: 'absolute',
+        left: (this.viewMode === 'bookshelf' ? '0px' : '-3000px'),
+        top: '0px',
+        width: STAGE_WIDTH + 'px',
+        height: '240px',
+        paddingLeft: '12px',
+        paddingRight: '12px',
+        paddingTop: '14px',
+        paddingBottom: '14px'
+      },
+      on: {
+        scroll: (e) => this.handleBookshelfScroll(e)
+      }
+    }, [
+      this.bookshelf.length === 0
+        ? h('div', {
+            style: {
+              width: BOOKSHELF_CONTENT_WIDTH + 'px',
+              height: '212px',
+              backgroundColor: '#12151E',
+              borderRadius: '14px',
+              borderWidth: '1px',
+              borderColor: '#1E2536',
+              justifyContent: 'center',
+              alignItems: 'center',
+              flexDirection: 'column'
+            }
+          }, [
+            h('text', {
+              style: { color: '#F8FAFC', fontSize: '18px', fontWeight: 'bold' }
+            }, '书架暂无漫画'),
+            h('text', {
+              style: { color: '#94A3B8', fontSize: '14px', marginTop: '12px' }
+            }, '请通过电脑连接 USB (MTP)，将漫画文件夹放入 Favorite 目录中'),
+            h('text', {
+              style: { color: '#64748B', fontSize: '12px', marginTop: '6px' }
+            }, '支持格式: png, jpg, jpeg, webp · 支持1~1000+自然编号 · 首张为封面')
+          ])
+        : h('div', {
+            key: 'bookshelf-card-row',
                   style: {
+                    width: Math.max(BOOKSHELF_CONTENT_WIDTH, this.bookshelf.length * 292 + 40) + 'px',
                     flexDirection: 'row',
                     alignItems: 'center',
                     height: '212px',
@@ -1510,6 +1587,7 @@ const RootComponent = {
                   const isCur = this.currentBookIndex === idx;
                   return h('div', {
                     key: 'book-' + book.id,
+                    ref: 'bookshelfCard_' + idx,
                     style: {
                       width: '274px',
                       height: '198px',
@@ -1666,36 +1744,36 @@ const RootComponent = {
                   ])
                 ]);
               }))
-            ])
-        ])
-      ]);
-    }
+    ]);
 
     // ==============================================================
     // 视图 2 & 3: 双列无缝拼合瀑布流 + 单页大图检视 (常驻保活与视口虚拟化架构)
     // ==============================================================
     const renderPurePageImage = (p, imgWidth, rowHeight, align = 'center') => {
-      // 画面清晰度方案: 双列优先使用 850px 视网膜高清源 (如无则回退 thumbSrc)
-      const displaySrc = p.highSrc || p.thumbSrc || p.src;
+      // 瀑布流双轨分流: 474px 硬件点对点缩略图直通，保障高帧率丝滑滑动与零显存抖动
+      const displaySrc = p.thumbSrc || p.src;
+      const exactH = p.cardHeight || rowHeight;
       return h('div', {
         key: 'card-' + p.id,
         ref: 'wfCard_' + p.id,
         style: {
           width: imgWidth + 'px',
-          height: (rowHeight || p.cardHeight) + 'px',
+          height: rowHeight + 'px',
           backgroundColor: '#0A0C10',
           overflow: 'hidden',
           justifyContent: 'center',
-          alignItems: align
+          alignItems: align,
+          flexShrink: 0
         },
         on: { click: () => this.openSingleView(p.id) }
       }, [
         h('image', {
-          attrs: { src: displaySrc, resize: 'cover', resizable: 'false' },
+          attrs: { src: displaySrc, resize: 'contain', resizable: 'false' },
           style: {
             width: imgWidth + 'px',
-            height: (rowHeight || p.cardHeight) + 'px',
-            backgroundColor: '#0A0C10'
+            height: exactH + 'px',
+            backgroundColor: '#0A0C10',
+            flexShrink: 0
           },
           on: {
             load: (e) => this.handleImageLoad(p, e)
@@ -1751,7 +1829,7 @@ const RootComponent = {
           }
         }, [
           h('image', {
-            attrs: { src: (curP.highSrc || curP.thumbSrc || curP.src), resize: 'contain', resizable: 'false' },
+            attrs: { src: curP.src, resize: 'contain', resizable: 'false' },
             style: {
               width: renderWidth + 'px',
               height: renderHeight + 'px',
@@ -1780,7 +1858,7 @@ const RootComponent = {
       }, [
         renderLeftSidebar(this.viewMode),
 
-        // 右侧 972x240 阅读主视窗
+        // 右侧 972x240 主视窗: 书架与瀑布流双常驻保活架构
         h('div', {
           style: {
             position: 'relative',
@@ -1790,7 +1868,10 @@ const RootComponent = {
             overflow: 'hidden'
           }
         }, [
-          // 常驻双列瀑布流 Scroller
+          // 1. 书架常驻 Scroller (left: -3000px 保活)
+          bookshelfScrollerVNode,
+
+          // 2. 瀑布流常驻 Scroller (书架模式时 left: -3000px 保活)
           h('scroller', {
             key: 'waterfall-main-scroller',
             ref: 'waterfallScroller',
@@ -1803,10 +1884,13 @@ const RootComponent = {
               'offset-accuracy': 10
             },
             style: {
+              position: 'absolute',
+              left: (this.viewMode !== 'bookshelf' ? '0px' : '-3000px'),
+              top: '0px',
               width: STAGE_WIDTH + 'px',
               height: STAGE_HEIGHT + 'px',
-              paddingLeft: '12px',
-              paddingRight: '12px',
+              paddingLeft: '11px',
+              paddingRight: '11px',
               paddingTop: '8px'
             },
             on: {
@@ -1834,13 +1918,14 @@ const RootComponent = {
                     height: row.contentHeight + 'px',
                     marginBottom: ROW_GAP + 'px',
                     borderRadius: '6px',
-                    backgroundColor: '#0A0C10'
+                    backgroundColor: '#0A0C10',
+                    flexShrink: 0
                   }
                 });
               }
 
               if (row.type === 'wide') {
-                // 横向跨页宽图或单页独立封面: 若为真实跨页宽图则 948px 整行展开，若为竖向封面则 474px 居中点对点展示
+                // 横向跨页宽图或单页独立封面: 若为真实跨页宽图则 950px 整行展开，若为竖向封面则 474px 居中点对点展示
                 const isRealWide = row.item.isWide;
                 const targetW = isRealWide ? WATERFALL_CONTENT_WIDTH : DUAL_COLUMN_WIDTH;
                 return h('div', {
@@ -1855,13 +1940,31 @@ const RootComponent = {
                     backgroundColor: '#0A0C10',
                     flexDirection: 'row',
                     justifyContent: 'center',
-                    alignItems: 'center'
+                    alignItems: 'center',
+                    flexShrink: 0
                   }
                 }, [
                   renderPurePageImage(row.item, targetW, row.contentHeight)
                 ]);
               } else {
-                // 竖向/方幅漫画双列: 左右向脊线贴合对齐 (左页右靠、右页左靠)，中间零缝隙紧贴拼接
+                // 竖向/方幅漫画双列: 左右向两边移，中间 2px 分割线，严禁缩小图片尺寸
+                const children = [];
+                for (let idx = 0; idx < row.items.length; idx++) {
+                  if (idx > 0) {
+                    children.push(h('div', {
+                      key: 'divider-' + rIdx + '-' + idx,
+                      style: {
+                        width: '2px',
+                        height: row.contentHeight + 'px',
+                        backgroundColor: '#1E2433',
+                        flexShrink: 0
+                      }
+                    }));
+                  }
+                  // idx === 0 (左卡片) 靠左对齐 flex-start，idx === 1 (右卡片) 靠右对齐 flex-end (向两边移)
+                  const alignDir = (idx === 0) ? 'flex-start' : 'flex-end';
+                  children.push(renderPurePageImage(row.items[idx], DUAL_COLUMN_WIDTH, row.contentHeight, alignDir));
+                }
                 return h('div', {
                   key: 'row-' + rIdx,
                   ref: 'wfRow_' + rIdx,
@@ -1873,13 +1976,11 @@ const RootComponent = {
                     overflow: 'hidden',
                     backgroundColor: '#0A0C10',
                     flexDirection: 'row',
-                    justifyContent: 'center',
-                    alignItems: 'center'
+                    justifyContent: (row.items.length > 1) ? 'space-between' : 'flex-start',
+                    alignItems: 'center',
+                    flexShrink: 0
                   }
-                }, row.items.map((p, idx) => {
-                  const alignDir = (idx === 0) ? 'flex-end' : 'flex-start';
-                  return renderPurePageImage(p, DUAL_COLUMN_WIDTH, row.contentHeight, alignDir);
-                }));
+                }, children);
               }
             }))
           ])
