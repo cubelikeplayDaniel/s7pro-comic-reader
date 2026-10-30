@@ -207,7 +207,13 @@ def main():
     parser.add_argument("--start", action="store_true", help="Start application immediately after installation")
     args = parser.parse_args()
 
-    manifest_path = Path(args.src_dir) / "manifest.json"
+    src_dir_path = Path(args.src_dir)
+    manifest_path = src_dir_path / "manifest.json"
+    if not manifest_path.exists() and (src_dir_path / "src" / "manifest.json").exists():
+        src_dir_path = src_dir_path / "src"
+        manifest_path = src_dir_path / "manifest.json"
+        args.src_dir = str(src_dir_path)
+
     if not manifest_path.exists():
         print(f"Error: manifest.json not found in {args.src_dir}", file=sys.stderr)
         sys.exit(1)
@@ -242,23 +248,33 @@ def main():
         install_res = subprocess.run([pen_ssh, f"/usr/bin/miniapp_cli install {target_remote_amr}"], capture_output=True, text=True)
         print(install_res.stdout.strip())
 
-        # Ensure webp_daemon.sh is deployed with 474px point-to-point hardware scaling
-        print("[Deploy] Updating /userdisk/bin/webp_daemon.sh with 474px point-to-point scaling...")
+        # Ensure webp_daemon.sh is deployed with low-overhead, nice -n 19 and 30s interval
+        print("[Deploy] Updating /userdisk/bin/webp_daemon.sh with low-overhead background daemon...")
         daemon_setup = (
             "mkdir -p /userdisk/bin && cat << 'EOF' > /userdisk/bin/webp_daemon.sh\n"
             "#!/bin/sh\n"
-            "# High-Performance WebP Decoder & 474px Point-to-Point Image Optimizer\n"
+            "# Low-Overhead WebP Decoder & 474px Point-to-Point Image Optimizer\n"
+            "PIDFILE=\"/tmp/webp_daemon.pid\"\n"
+            "if [ -f \"$PIDFILE\" ]; then\n"
+            "  OLDPID=$(cat \"$PIDFILE\" 2>/dev/null)\n"
+            "  if [ -n \"$OLDPID\" ] && kill -0 \"$OLDPID\" 2>/dev/null; then\n"
+            "    exit 0\n"
+            "  fi\n"
+            "fi\n"
+            "echo $$ > \"$PIDFILE\"\n"
+            "\n"
             "TARGET_DIRS=\"/userdisk/Favorite /userdisk/Music /userdisk/skip_re /userdisk/Comics /userdisk/manga\"\n"
             "\n"
             "while true; do\n"
             "  for root in $TARGET_DIRS; do\n"
             "    if [ -d \"$root\" ]; then\n"
-            "      find \"$root\" -type f -name \"*.webp\" 2>/dev/null | while read -r webp_file; do\n"
+            "      # 1. 自动转换 WebP 格式图片\n"
+            "      find \"$root\" -type f -name \"*.webp\" ! -name \".*\" ! -name \"._*\" 2>/dev/null | while read -r webp_file; do\n"
             "        target_jpg=\"${webp_file%.webp}.jpg\"\n"
             "        target_thumb=\"${webp_file%.webp}_thumb.jpg\"\n"
             "        if [ ! -f \"$target_jpg\" ]; then\n"
-            "          ffmpeg -y -i \"$webp_file\" -q:v 3 \"$target_jpg\" -loglevel error </dev/null\n"
-            "          ffmpeg -y -i \"$target_jpg\" -vf 'scale=474:-1' -q:v 4 \"$target_thumb\" -loglevel error </dev/null\n"
+            "          nice -n 19 ffmpeg -y -i \"$webp_file\" -q:v 3 \"$target_jpg\" -loglevel error </dev/null\n"
+            "          nice -n 19 ffmpeg -y -i \"$target_jpg\" -vf 'scale=474:-1' -q:v 4 \"$target_thumb\" -loglevel error </dev/null\n"
             "          if [ -s \"$target_jpg\" ]; then\n"
             "            chmod 666 \"$target_jpg\" \"$target_thumb\" 2>/dev/null\n"
             "            rm -f \"$webp_file\"\n"
@@ -266,16 +282,21 @@ def main():
             "        fi\n"
             "      done\n"
             "\n"
-            "      find \"$root\" -type f \\( -name \"*.jpg\" -o -name \"*.png\" \\) ! -name \"*_thumb.jpg\" 2>/dev/null | while read -r img_file; do\n"
-            "        thumb_file=\"${img_file%.*}_thumb.jpg\"\n"
-            "        if [ ! -f \"$thumb_file\" ]; then\n"
-            "          ffmpeg -y -i \"$img_file\" -vf 'scale=474:-1' -q:v 4 \"$thumb_file\" -loglevel error </dev/null\n"
+            "      # 2. 自动补充缺失的 474px 缩略图 (严格过滤隐藏文件与 AppleDouble ._ 垃圾文件)\n"
+            "      find \"$root\" -type f \\( -name \"*.jpg\" -o -name \"*.jpeg\" -o -name \"*.png\" \\) ! -name \"*_thumb.*\" ! -name \"*_high.*\" ! -name \".*\" ! -name \"._*\" 2>/dev/null | while read -r img_file; do\n"
+            "        dir_part=\"${img_file%/*}\"\n"
+            "        base_part=\"${img_file##*/}\"\n"
+            "        name_part=\"${base_part%.*}\"\n"
+            "        thumb_file=\"$dir_part/${name_part}_thumb.jpg\"\n"
+            "        if [ ! -f \"$thumb_file\" ] && [ ! -f \"$dir_part/${name_part}_thumb.png\" ]; then\n"
+            "          nice -n 19 ffmpeg -y -i \"$img_file\" -vf 'scale=474:-1' -q:v 4 \"$thumb_file\" -loglevel error </dev/null\n"
             "          [ -s \"$thumb_file\" ] && chmod 666 \"$thumb_file\" 2>/dev/null\n"
             "        fi\n"
             "      done\n"
             "    fi\n"
             "  done\n"
-            "  sleep 2\n"
+            "  # 深度休眠 30 秒，绝不高频死循环抢占单核 CPU\n"
+            "  sleep 30\n"
             "done\n"
             "EOF\n"
             "chmod +x /userdisk/bin/webp_daemon.sh\n"
