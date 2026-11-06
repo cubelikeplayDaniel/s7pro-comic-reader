@@ -1012,12 +1012,16 @@ const RootComponent = {
           applyPageGeometry(pageObj, nw, nh, true);
 
           // 关键平抑: 同卷漫画比例通常高度统一。若此前整书未预置几何，将该比例同步给同卷未验证页面，避免每页异步加载时轮流突变
-          const book = this.currentBook;
-          if (book && Array.isArray(book.pages)) {
-            for (let i = 0; i < book.pages.length; i++) {
-              const p = book.pages[i];
-              if (p && !p.geometryVerified && !p.isWide) {
-                applyPageGeometry(p, nw, nh, false);
+          // 核心防护: 跨页宽漫/横版封面 (isWide = true) 具有特异孤立性，绝对严禁将宽漫几何广播给其他未验证页面！
+          // 仅当当前验证的页面是常规竖向单页漫画时 (!pageObj.isWide)，才将标准竖向比例平抑同步给未验证页面
+          if (!pageObj.isWide) {
+            const book = this.currentBook;
+            if (book && Array.isArray(book.pages)) {
+              for (let i = 0; i < book.pages.length; i++) {
+                const p = book.pages[i];
+                if (p && !p.geometryVerified) {
+                  applyPageGeometry(p, nw, nh, false);
+                }
               }
             }
           }

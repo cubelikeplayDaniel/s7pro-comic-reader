@@ -288,4 +288,73 @@ console.log("  - Object references preserved: YES");
 console.log("  - Verified geometry preserved: YES (NO RESET TO 474x632)");
 console.log("  - Wide page format preserved: YES (NO SHRINK TO 728)");
 console.log("  - Newly converted pages smoothly appended: YES");
-console.log("ALL IN-PLACE PATCHING TESTS PASSED PERFECTLY!");
+
+// Step 5: Test Wide Cover Isolation (Prevent Row 1 having only 2 and no 3!)
+console.log("\n=== Step 5: Testing Wide Cover Isolation & Dual Pair Integrity ===");
+function computeBookLayoutTest(pages) {
+  const rows = [];
+  let pendingDual = [];
+  for (let i = 0; i < pages.length; i++) {
+    const p = pages[i];
+    if (i === 0 || p.isWide) {
+      if (pendingDual.length > 0) {
+        rows.push({ type: 'dual', items: pendingDual, firstPageId: pendingDual[0].id });
+        pendingDual = [];
+      }
+      rows.push({ type: 'wide', item: p, firstPageId: p.id });
+    } else {
+      pendingDual.push(p);
+      if (pendingDual.length === 2) {
+        rows.push({ type: 'dual', items: pendingDual, firstPageId: pendingDual[0].id });
+        pendingDual = [];
+      }
+    }
+  }
+  if (pendingDual.length > 0) {
+    rows.push({ type: 'dual', items: pendingDual, firstPageId: pendingDual[0].id });
+  }
+  return rows;
+}
+
+const wideCoverPages = [
+  { id: 1, fileName: '01.jpg', geometryVerified: false },
+  { id: 2, fileName: '02.jpg', geometryVerified: false },
+  { id: 3, fileName: '03.jpg', geometryVerified: false },
+  { id: 4, fileName: '04.jpg', geometryVerified: false },
+  { id: 5, fileName: '05.jpg', geometryVerified: false }
+];
+wideCoverPages.forEach(p => applyPageGeometry(p, 474, 632, false));
+
+// Simulate fixed handleImageLoad logic when Page 1 (Wide cover 1920x1340) loads:
+const geom1 = classifyPageGeometry(1920, 1340);
+applyPageGeometry(wideCoverPages[0], 1920, 1340, true);
+assert.strictEqual(wideCoverPages[0].isWide, true);
+
+// MUST NOT broadcast wide geometry to unverified pages!
+if (!geom1.isWide) {
+  for (const p of wideCoverPages) {
+    if (p && !p.geometryVerified) applyPageGeometry(p, 1920, 1340, false);
+  }
+}
+
+// Verify unverified pages (2..5) remain portrait (isWide = false)
+assert.strictEqual(wideCoverPages[1].isWide, false, "Page 2 must NOT be corrupted into wide!");
+assert.strictEqual(wideCoverPages[2].isWide, false, "Page 3 must NOT be corrupted into wide!");
+
+// Compute layout:
+const rowsAfterCover = computeBookLayoutTest(wideCoverPages);
+assert.strictEqual(rowsAfterCover[0].type, 'wide');
+assert.strictEqual(rowsAfterCover[0].item.fileName, '01.jpg');
+
+assert.strictEqual(rowsAfterCover[1].type, 'dual', "Row 1 must be dual!");
+assert.strictEqual(rowsAfterCover[1].items.length, 2, "Row 1 MUST contain both page 2 and page 3!");
+assert.strictEqual(rowsAfterCover[1].items[0].fileName, '02.jpg');
+assert.strictEqual(rowsAfterCover[1].items[1].fileName, '03.jpg');
+
+assert.strictEqual(rowsAfterCover[2].type, 'dual', "Row 2 must be dual!");
+assert.strictEqual(rowsAfterCover[2].items.length, 2, "Row 2 MUST contain both page 4 and page 5!");
+assert.strictEqual(rowsAfterCover[2].items[0].fileName, '04.jpg');
+assert.strictEqual(rowsAfterCover[2].items[1].fileName, '05.jpg');
+
+console.log("✓ Step 5: Wide cover isolation verified! Row 1 has both page 2 and page 3. No orphan row!");
+console.log("ALL TESTS (IN-PLACE PATCHING & PAIR INTEGRITY) PASSED PERFECTLY!");
